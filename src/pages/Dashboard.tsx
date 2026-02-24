@@ -1,13 +1,11 @@
-// Owner Dashboard Page
-// Shows user's organizations and allows creating new ones
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { apiClient } from '@/lib/apiClient';
+import type { Organization, Assessment } from '@/lib/apiClient';
 import { CreateOrganizationModal } from '@/components/CreateOrganizationModal';
 import InviteMemberModal from '@/components/InviteMemberModal';
 import { LEADERSHIP_FAMILIES, type LeadershipFamilyCode } from '@/types/equip360';
-import type { Organization, Assessment } from '@/types/database';
 import './Dashboard.css';
 
 interface OrganizationWithCounts extends Organization {
@@ -28,149 +26,67 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (user) {
-      fetchOrganizations();
+      fetchDashboardData();
     }
   }, [user]);
 
-  const fetchOrganizations = async () => {
+  const fetchDashboardData = async () => {
     if (!user) {
       setLoading(false);
       return;
     }
 
-    console.log('Fetching organizations for user:', user.id);
-
     try {
-      // Fetch organizations owned by this user AND organizations they're a member of
-      const [ownedOrgsResult, memberOrgsResult] = await Promise.all([
-        // Organizations user owns
-        supabase
-          .from('organizations')
-          .select('*')
-          .eq('owner_id', user.id)
-          .order('created_at', { ascending: false }),
-        // Organizations user is a member of (not owner)
-        supabase
-          .from('organization_members')
-          .select('organization_id, member_type, organization:organizations(*)')
-          .eq('user_id', user.id),
+      const [orgsData, assessments] = await Promise.all([
+        apiClient.organizations.list(),
+        apiClient.assessments.mine(),
       ]);
 
-      const ownedOrgs = ownedOrgsResult.data || [];
-      const memberOrgs = memberOrgsResult.data || [];
+      const { owned, memberOf, memberTypes } = orgsData;
 
-      console.log('Owned orgs:', ownedOrgs.length, 'Member orgs:', memberOrgs.length);
+      const memberTypeMap = new Map(memberTypes.map((m) => [m.organizationId, m.memberType]));
 
-      // Combine owned and member orgs, marking ownership
-      const ownedOrgIds = new Set(ownedOrgs.map(o => o.id));
+      const allOrgs: OrganizationWithCounts[] = [
+        ...owned.map((org) => ({ ...org, is_owner: true })),
+        ...memberOf.map((org) => ({
+          ...org,
+          is_owner: false,
+          member_type: (memberTypeMap.get(org.id) as 'team' | 'candidate') || 'team',
+        })),
+      ];
 
-      // Add owned orgs with is_owner flag
-      const allOrgs: OrganizationWithCounts[] = ownedOrgs.map(org => ({
-        ...org,
-        is_owner: true,
-      }));
+      if (allOrgs.length > 0) {
+        const statsResults = await Promise.allSettled(
+          allOrgs.map((org) => apiClient.organizations.getStats(org.id))
+        );
 
-      // Add member orgs (excluding ones user owns)
-      memberOrgs.forEach((membership) => {
-        const org = membership.organization as unknown as Organization;
-        if (!ownedOrgIds.has(membership.organization_id) && org) {
-          allOrgs.push({
+        const orgsWithCounts = allOrgs.map((org, i) => {
+          const stats = statsResults[i].status === 'fulfilled' ? statsResults[i].value : null;
+          return {
             ...org,
-            is_owner: false,
-            member_type: membership.member_type as 'team' | 'candidate',
-          });
-        }
-      });
+            member_count: stats?.memberCount ?? 0,
+            completed_count: stats?.assessmentCount ?? 0,
+            pending_invites: stats?.pendingInviteCount ?? 0,
+          };
+        });
 
-      // If no orgs, just set empty array and stop loading
-      if (allOrgs.length === 0) {
-        console.log('No organizations found');
+        setOrganizations(orgsWithCounts);
+      } else {
         setOrganizations([]);
-        setLoading(false);
-        return;
       }
 
-      const orgs = allOrgs;
-
-      // Fetch all counts in parallel for better performance
-      const orgIds = orgs.map(org => org.id);
-
-      // Run all count queries in parallel
-      const [memberCounts, assessmentCounts, inviteCounts] = await Promise.all([
-        // Get member counts for all orgs at once
-        supabase
-          .from('organization_members')
-          .select('organization_id', { count: 'exact' })
-          .in('organization_id', orgIds),
-        // Get assessment counts for all orgs at once
-        supabase
-          .from('assessments')
-          .select('organization_id', { count: 'exact' })
-          .in('organization_id', orgIds),
-        // Get pending invite counts for all orgs at once
-        supabase
-          .from('invitations')
-          .select('organization_id', { count: 'exact' })
-          .in('organization_id', orgIds)
-          .eq('status', 'pending'),
-      ]);
-
-      // Create count maps for O(1) lookup
-      const memberCountMap = new Map<string, number>();
-      const assessmentCountMap = new Map<string, number>();
-      const inviteCountMap = new Map<string, number>();
-
-      // Count members per org from raw data
-      (memberCounts.data || []).forEach((row: { organization_id: string }) => {
-        const orgId = row.organization_id;
-        memberCountMap.set(orgId, (memberCountMap.get(orgId) || 0) + 1);
-      });
-
-      // Count assessments per org from raw data
-      (assessmentCounts.data || []).forEach((row: { organization_id: string }) => {
-        const orgId = row.organization_id;
-        assessmentCountMap.set(orgId, (assessmentCountMap.get(orgId) || 0) + 1);
-      });
-
-      // Count invites per org from raw data
-      (inviteCounts.data || []).forEach((row: { organization_id: string }) => {
-        const orgId = row.organization_id;
-        inviteCountMap.set(orgId, (inviteCountMap.get(orgId) || 0) + 1);
-      });
-
-      // Merge counts with organizations
-      const orgsWithCounts = orgs.map((org) => ({
-        ...org,
-        member_count: memberCountMap.get(org.id) || 0,
-        completed_count: assessmentCountMap.get(org.id) || 0,
-        pending_invites: inviteCountMap.get(org.id) || 0,
-      }));
-
-      console.log('Organizations with counts:', orgsWithCounts.length);
-      setOrganizations(orgsWithCounts);
-
-      // Fetch user's most recent assessment
-      const { data: assessmentData } = await supabase
-        .from('assessments')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('completed_at', { ascending: false })
-        .limit(1)
-        .single();
-
-      if (assessmentData) {
-        setUserAssessment(assessmentData as Assessment);
-        console.log('User assessment found:', assessmentData.leadership_type);
+      if (assessments.length > 0) {
+        setUserAssessment(assessments[0]);
       }
     } catch (error) {
-      console.error('Error fetching organizations:', error);
+      console.error('Error fetching dashboard data:', error);
     } finally {
       setLoading(false);
     }
   };
 
   const handleOrganizationCreated = () => {
-    fetchOrganizations();
+    fetchDashboardData();
     setShowCreateModal(false);
   };
 
@@ -188,7 +104,6 @@ export default function Dashboard() {
   return (
     <div className="dashboard-page">
       <div className="dashboard-container">
-        {/* Header */}
         <header className="dashboard-header">
           <div className="header-left">
             <h1>Dashboard</h1>
@@ -209,7 +124,6 @@ export default function Dashboard() {
           </div>
         </header>
 
-        {/* Your Assessment Section */}
         <div className="your-assessment-section">
           <h2>Your Assessment</h2>
           {userAssessment ? (
@@ -218,23 +132,23 @@ export default function Dashboard() {
                 <div
                   className="leadership-badge-large"
                   style={{
-                    borderColor: LEADERSHIP_FAMILIES[userAssessment.leadership_family as LeadershipFamilyCode]?.color || '#666'
+                    borderColor: LEADERSHIP_FAMILIES[userAssessment.leadershipFamily as LeadershipFamilyCode]?.color || '#666'
                   }}
                 >
                   <span className="badge-label">Your Leadership Identity</span>
                   <span
                     className="badge-family"
                     style={{
-                      color: LEADERSHIP_FAMILIES[userAssessment.leadership_family as LeadershipFamilyCode]?.color || '#666'
+                      color: LEADERSHIP_FAMILIES[userAssessment.leadershipFamily as LeadershipFamilyCode]?.color || '#666'
                     }}
                   >
-                    {LEADERSHIP_FAMILIES[userAssessment.leadership_family as LeadershipFamilyCode]?.name || userAssessment.leadership_family}
+                    {LEADERSHIP_FAMILIES[userAssessment.leadershipFamily as LeadershipFamilyCode]?.name || userAssessment.leadershipFamily}
                   </span>
-                  <span className="badge-type">{userAssessment.leadership_type?.replace(/_/g, ' ')}</span>
+                  <span className="badge-type">{userAssessment.leadershipType?.replace(/_/g, ' ')}</span>
                 </div>
                 <div className="assessment-meta">
                   <span className="completed-date">
-                    Completed {new Date(userAssessment.completed_at).toLocaleDateString()}
+                    Completed {new Date(userAssessment.completedAt || '').toLocaleDateString()}
                   </span>
                   <Link to={`/results/${userAssessment.id}`} className="btn btn-primary">
                     View Full Results
@@ -258,7 +172,6 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Empty State */}
         {organizations.length === 0 ? (
           <div className="empty-state">
             {profile?.account_type === 'admin' ? (
@@ -298,7 +211,6 @@ export default function Dashboard() {
           </div>
         ) : (
           <>
-            {/* Actions Bar */}
             <div className="dashboard-actions">
               {profile?.account_type === 'admin' && (
                 <button
@@ -315,7 +227,6 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* Organizations Grid */}
             <div className="organizations-grid">
               {organizations.map((org) => (
                 <div key={org.id} className="organization-card">
@@ -371,7 +282,6 @@ export default function Dashboard() {
           </>
         )}
 
-        {/* Quick Links */}
         <div className="dashboard-quick-links">
           <h3>Quick Actions</h3>
           <div className="quick-links-grid">
@@ -403,7 +313,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Create Organization Modal */}
       {showCreateModal && (
         <CreateOrganizationModal
           onClose={() => setShowCreateModal(false)}
@@ -411,12 +320,11 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Invite Member Modal */}
       {inviteOrg && (
         <InviteMemberModal
           organization={inviteOrg}
           onClose={() => setInviteOrg(null)}
-          onInviteSent={() => fetchOrganizations()}
+          onInviteSent={() => fetchDashboardData()}
         />
       )}
     </div>

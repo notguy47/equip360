@@ -1,19 +1,15 @@
-// Upgrade to Admin Account Page
-// Allows members to request an upgrade to admin account
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
 import './UpgradePage.css';
 
 export default function UpgradePage() {
-  const { user, profile, refreshProfile } = useAuth();
+  const { profile, updateProfile } = useAuth();
   const navigate = useNavigate();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-  // If already an admin, redirect to dashboard
   if (profile?.account_type === 'admin') {
     return (
       <div className="upgrade-page">
@@ -34,40 +30,22 @@ export default function UpgradePage() {
   }
 
   const handleUpgrade = async () => {
-    if (!user) return;
-
     setIsSubmitting(true);
     setError(null);
 
-    try {
-      // Update user's account type to admin
-      const { error: updateError } = await supabase
-        .from('profiles')
-        .update({
-          account_type: 'admin',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', user.id);
+    const { error: updateError } = await updateProfile({ account_type: 'admin' });
 
-      if (updateError) {
-        throw updateError;
-      }
-
-      // Refresh the profile in context
-      await refreshProfile();
-
-      setSuccess(true);
-
-      // Redirect to dashboard after a short delay
-      setTimeout(() => {
-        navigate('/dashboard');
-      }, 2000);
-    } catch (err) {
-      console.error('Upgrade error:', err);
+    if (updateError) {
+      console.error('Upgrade error:', updateError);
       setError('Failed to upgrade your account. Please try again.');
-    } finally {
       setIsSubmitting(false);
+      return;
     }
+
+    setSuccess(true);
+    setTimeout(() => {
+      navigate('/dashboard');
+    }, 2000);
   };
 
   if (success) {

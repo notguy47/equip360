@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
 import { getInvitationByToken, acceptInvitation } from '@/services/invitations';
-import type { InvitationWithOrganization } from '@/types/database';
+import type { Invitation } from '@/lib/apiClient';
 import './InviteAccept.css';
 
 export default function InviteAccept() {
@@ -10,12 +10,11 @@ export default function InviteAccept() {
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
 
-  const [invitation, setInvitation] = useState<InvitationWithOrganization | null>(null);
+  const [invitation, setInvitation] = useState<Invitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [accepting, setAccepting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch invitation details
   useEffect(() => {
     async function fetchInvitation() {
       if (!token) {
@@ -48,7 +47,6 @@ export default function InviteAccept() {
     fetchInvitation();
   }, [token]);
 
-  // Handle accepting the invitation
   const handleAccept = async () => {
     if (!user || !token) return;
 
@@ -59,15 +57,12 @@ export default function InviteAccept() {
       const result = await acceptInvitation(token, user.id);
 
       if (result.success) {
-        // If candidate, redirect to start assessment
-        // If team member, redirect to dashboard
-        if (invitation?.member_type === 'candidate') {
-          // Store org context for assessment
+        if (invitation?.memberType === 'candidate') {
           localStorage.setItem(
             'pending_assessment_org',
             JSON.stringify({
               organizationId: result.organizationId,
-              organizationName: invitation.organization.name,
+              organizationName: invitation.organization?.name,
             })
           );
           navigate('/start');
@@ -84,20 +79,13 @@ export default function InviteAccept() {
     }
   };
 
-  // Redirect to login with return URL if not authenticated
-  const handleLoginRedirect = () => {
-    // Store the invite token for after login
-    localStorage.setItem('pending_invite_token', token || '');
-    navigate('/login');
+  const handleAuthRedirect = () => {
+    if (token) {
+      localStorage.setItem('pending_invite_token', token);
+    }
+    window.location.href = '/api/login';
   };
 
-  const handleSignupRedirect = () => {
-    // Store the invite token for after signup
-    localStorage.setItem('pending_invite_token', token || '');
-    navigate('/signup');
-  };
-
-  // Loading state
   if (loading || authLoading) {
     return (
       <div className="invite-page">
@@ -109,7 +97,6 @@ export default function InviteAccept() {
     );
   }
 
-  // Error state
   if (error) {
     return (
       <div className="invite-page">
@@ -127,7 +114,6 @@ export default function InviteAccept() {
     );
   }
 
-  // No invitation found
   if (!invitation) {
     return (
       <div className="invite-page">
@@ -145,7 +131,7 @@ export default function InviteAccept() {
     );
   }
 
-  const isCandidate = invitation.member_type === 'candidate';
+  const isCandidate = invitation.memberType === 'candidate';
 
   return (
     <div className="invite-page">
@@ -156,7 +142,7 @@ export default function InviteAccept() {
           <h1>You're Invited!</h1>
 
           <p className="invite-org">
-            <strong>{invitation.organization.name}</strong> has invited you to
+            <strong>{invitation.organization?.name}</strong> has invited you to
             {isCandidate
               ? ' complete the E.Q.U.I.P. 360 Leadership Assessment.'
               : ' join their team on E.Q.U.I.P. 360.'}
@@ -175,7 +161,6 @@ export default function InviteAccept() {
           )}
 
           {user ? (
-            // User is logged in - show accept button
             <div className="invite-actions">
               <button
                 className="btn btn-primary btn-lg"
@@ -193,16 +178,11 @@ export default function InviteAccept() {
               </p>
             </div>
           ) : (
-            // User not logged in - show login/signup options
             <div className="invite-actions">
               <p className="auth-prompt">Sign in or create an account to accept this invitation:</p>
-
               <div className="auth-buttons">
-                <button className="btn btn-primary btn-lg" onClick={handleSignupRedirect}>
-                  Create Account
-                </button>
-                <button className="btn btn-secondary btn-lg" onClick={handleLoginRedirect}>
-                  Sign In
+                <button className="btn btn-primary btn-lg" onClick={handleAuthRedirect}>
+                  Sign In / Create Account
                 </button>
               </div>
             </div>

@@ -1,21 +1,19 @@
-// Protected Route Component
-// Redirects unauthenticated users to login page
-import { Navigate, useLocation } from 'react-router-dom';
+import { useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
-  requireProfile?: boolean; // Require complete profile (first/last name)
 }
 
-export function ProtectedRoute({
-  children,
-  requireProfile = false,
-}: ProtectedRouteProps) {
-  const { user, profile, loading, isConfigured } = useAuth();
-  const location = useLocation();
+export function ProtectedRoute({ children }: ProtectedRouteProps) {
+  const { user, loading } = useAuth();
 
-  // Show loading state while checking auth
+  useEffect(() => {
+    if (!loading && !user) {
+      window.location.href = '/api/login';
+    }
+  }, [user, loading]);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-black">
@@ -27,36 +25,8 @@ export function ProtectedRoute({
     );
   }
 
-  // If Supabase isn't configured, show warning (dev mode)
-  if (!isConfigured) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-black">
-        <div className="card p-8 max-w-md text-center">
-          <h1 className="text-xl font-bold text-gold mb-4">
-            Configuration Required
-          </h1>
-          <p className="text-gray-400 mb-4">
-            Supabase environment variables are not configured. Please add
-            VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your .env.local
-            file.
-          </p>
-          <a href="/" className="btn btn-outline">
-            Return Home
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  // Redirect to login if not authenticated
   if (!user) {
-    // Store the intended destination for redirect after login
-    return <Navigate to="/login" state={{ from: location }} replace />;
-  }
-
-  // Optionally require complete profile
-  if (requireProfile && profile && (!profile.first_name || !profile.last_name)) {
-    return <Navigate to="/complete-profile" state={{ from: location }} replace />;
+    return null;
   }
 
   return <>{children}</>;

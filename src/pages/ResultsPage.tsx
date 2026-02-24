@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAssessment } from '@/context';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { apiClient } from '@/lib/apiClient';
 import {
   LEADERSHIP_FAMILIES,
   LEADERSHIP_TYPES,
@@ -36,10 +36,8 @@ function ResultsPage() {
   const { result, user } = state;
   const { user: authUser } = useAuth();
 
-  // Track if we've already uploaded the PDF to prevent duplicates
   const hasUploadedPDF = useRef(false);
-  // Track if we've already saved to Supabase
-  const hasSavedToSupabase = useRef(false);
+  const hasSaved = useRef(false);
 
   // Redirect if no result
   useEffect(() => {
@@ -86,31 +84,22 @@ function ResultsPage() {
     uploadPDF();
   }, [result, user]);
 
-  // Save assessment to Supabase if user is authenticated
   useEffect(() => {
-    if (!result || !authUser || hasSavedToSupabase.current) {
+    if (!result || !authUser || hasSaved.current) {
       return;
     }
 
-    const saveToSupabase = async () => {
-      // First try to get org context from localStorage (set during invite flow)
+    const saveResultToDb = async () => {
       let organizationId = getOrganizationContext()?.organizationId;
 
-      console.log('Saving assessment - org context from localStorage:', organizationId);
-
-      // If no localStorage context, check if user is a member of an organization
       if (!organizationId) {
-        console.log('No localStorage org context, checking organization_members...');
-        const { data: membership } = await supabase
-          .from('organization_members')
-          .select('organization_id')
-          .eq('user_id', authUser.id)
-          .limit(1)
-          .single();
-
-        if (membership) {
-          organizationId = membership.organization_id;
-          console.log('Found org from membership:', organizationId);
+        try {
+          const { memberOf } = await apiClient.organizations.list();
+          if (memberOf.length > 0) {
+            organizationId = memberOf[0].id;
+          }
+        } catch {
+          // no org context
         }
       }
 
@@ -122,14 +111,13 @@ function ResultsPage() {
       });
 
       if (saveResult.success) {
-        hasSavedToSupabase.current = true;
-        console.log('Assessment saved to Supabase:', saveResult.assessmentId, 'with org:', organizationId);
+        hasSaved.current = true;
       } else {
         console.warn('Failed to save assessment:', saveResult.error);
       }
     };
 
-    saveToSupabase();
+    saveResultToDb();
   }, [result, authUser, state.session?.responses]);
 
   if (!result) {

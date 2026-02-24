@@ -1,7 +1,6 @@
-// Create Organization Modal Component
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { apiClient } from '@/lib/apiClient';
 import './CreateOrganizationModal.css';
 
 interface Props {
@@ -23,44 +22,22 @@ export function CreateOrganizationModal({ onClose, onCreated }: Props) {
     setError('');
 
     try {
-      console.log('Creating organization:', name.trim(), 'for user:', user.id);
-
-      const { data, error: insertError } = await supabase
-        .from('organizations')
-        .insert({
-          name: name.trim(),
-          owner_id: user.id,
-        })
-        .select()
-        .single();
-
-      console.log('Create result:', data, 'error:', insertError?.message);
-
-      if (insertError) {
-        console.error('Error creating organization:', insertError);
-        setError('Failed to create team. Please try again.');
-        setLoading(false);
-        return;
-      }
-
-      console.log('Organization created successfully');
+      await apiClient.organizations.create(name.trim());
       setLoading(false);
       onCreated();
     } catch (err) {
-      console.error('Error:', err);
-      setError('An unexpected error occurred. Please try again.');
+      console.error('Error creating organization:', err);
+      setError('Failed to create team. Please try again.');
       setLoading(false);
     }
   };
 
-  // Close on escape key
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       onClose();
     }
   };
 
-  // Close on backdrop click
   const handleBackdropClick = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
       onClose();

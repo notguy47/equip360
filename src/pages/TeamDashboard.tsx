@@ -1,12 +1,10 @@
-// Team Dashboard Page
-// Shows organization members, their assessment status, and aggregated metrics
 import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { apiClient } from '@/lib/apiClient';
+import type { Organization, OrganizationMember, Assessment, Invitation } from '@/lib/apiClient';
 import InviteMemberModal from '@/components/InviteMemberModal';
 import { revokeInvitation } from '@/services/invitations';
-import type { Organization, Profile, Assessment, Invitation } from '@/types/database';
 import {
   LEADERSHIP_FAMILIES,
   LEADERSHIP_TYPES,
@@ -20,10 +18,10 @@ import './TeamDashboard.css';
 
 interface MemberWithAssessment {
   id: string;
-  user_id: string;
-  member_type: 'team' | 'candidate';
-  joined_at: string;
-  profile: Profile;
+  userId: string;
+  memberType: 'team' | 'candidate';
+  joinedAt: string | null;
+  profile: OrganizationMember['profile'];
   assessment?: Assessment;
 }
 
@@ -82,120 +80,45 @@ export default function TeamDashboard() {
       setLoading(true);
       setError(null);
 
-      // Fetch organization
-      const { data: org, error: orgError } = await supabase
-        .from('organizations')
-        .select('*')
-        .eq('id', orgId)
-        .single();
+      const [orgsData, membersData, assessmentsData, invitesData] = await Promise.all([
+        apiClient.organizations.list(),
+        apiClient.members.list(orgId),
+        apiClient.assessments.forOrg(orgId),
+        apiClient.invitations.listForOrg(orgId),
+      ]);
 
-      if (orgError || !org) {
-        setError('Organization not found');
+      const { owned, memberOf } = orgsData;
+      const org = [...owned, ...memberOf].find((o) => o.id === orgId);
+
+      if (!org) {
+        setError('Organization not found or you do not have access to this team');
         setLoading(false);
         return;
       }
 
-      // Check if user is owner or member
-      const isOwner = org.owner_id === user.id;
-      if (!isOwner) {
-        const { data: membership } = await supabase
-          .from('organization_members')
-          .select('id')
-          .eq('organization_id', orgId)
-          .eq('user_id', user.id)
-          .single();
+      setOrganization(org);
 
-        if (!membership) {
-          setError('You do not have access to this team');
-          setLoading(false);
-          return;
-        }
-      }
-
-      setOrganization(org as Organization);
-
-      // Fetch members, profiles, and assessments in parallel for better performance
-      const [membersResult, assessmentsResult] = await Promise.all([
-        supabase
-          .from('organization_members')
-          .select('id, user_id, member_type, joined_at')
-          .eq('organization_id', orgId),
-        supabase
-          .from('assessments')
-          .select('*')
-          .eq('organization_id', orgId),
-      ]);
-
-      const membersData = membersResult.data || [];
-      const assessmentsData = assessmentsResult.data || [];
-
-      console.log('TeamDashboard - Members fetched:', membersData.length, membersData);
-      console.log('TeamDashboard - Assessments fetched:', assessmentsData.length, assessmentsData);
-
-      if (membersResult.error) {
-        console.error('Error fetching members:', membersResult.error);
-      }
-      if (assessmentsResult.error) {
-        console.error('Error fetching assessments:', assessmentsResult.error);
-      }
-
-      // Fetch profiles for all member user_ids
-      const userIds = membersData.map((m) => m.user_id);
-      let profilesMap = new Map<string, Profile>();
-
-      if (userIds.length > 0) {
-        const { data: profilesData, error: profilesError } = await supabase
-          .from('profiles')
-          .select('*')
-          .in('id', userIds);
-
-        if (profilesError) {
-          console.error('Error fetching profiles:', profilesError);
-        }
-
-        (profilesData || []).forEach((p) => {
-          profilesMap.set(p.id, p as Profile);
-        });
-        console.log('TeamDashboard - Profiles fetched:', profilesData?.length || 0);
-      }
-
-      // Map assessments by user_id
       const assessmentsByUser = new Map<string, Assessment>();
       assessmentsData.forEach((a) => {
-        assessmentsByUser.set(a.user_id, a as Assessment);
+        assessmentsByUser.set(a.userId, a);
       });
 
-      // Build members with assessments
       const membersWithAssessments: MemberWithAssessment[] = membersData.map((m) => ({
         id: m.id,
-        user_id: m.user_id,
-        member_type: m.member_type as 'team' | 'candidate',
-        joined_at: m.joined_at,
-        profile: profilesMap.get(m.user_id) || ({} as Profile),
-        assessment: assessmentsByUser.get(m.user_id),
+        userId: m.userId,
+        memberType: m.memberType as 'team' | 'candidate',
+        joinedAt: m.joinedAt,
+        profile: m.profile,
+        assessment: assessmentsByUser.get(m.userId),
       }));
-
-      console.log('TeamDashboard - Members with assessments:', membersWithAssessments.length);
-      console.log('TeamDashboard - Members with completed:', membersWithAssessments.filter(m => m.assessment).length);
 
       setMembers(membersWithAssessments);
 
-      // Fetch pending invitations
-      const { data: invitesData } = await supabase
-        .from('invitations')
-        .select('*')
-        .eq('organization_id', orgId)
-        .eq('status', 'pending');
+      const pendingOnly = invitesData.filter((i) => i.status === 'pending');
+      setPendingInvites(pendingOnly);
 
-      setPendingInvites((invitesData as Invitation[]) || []);
-
-      // Calculate aggregated metrics
-      const completedAssessments = membersWithAssessments.filter((m) => m.assessment);
-      const aggregated = calculateAggregatedMetrics(
-        membersWithAssessments,
-        completedAssessments,
-        (invitesData as Invitation[]) || []
-      );
+      const completedMembers = membersWithAssessments.filter((m) => m.assessment);
+      const aggregated = calculateAggregatedMetrics(membersWithAssessments, completedMembers, pendingOnly);
       setMetrics(aggregated);
     } catch (err) {
       console.error('Error fetching team data:', err);
@@ -220,15 +143,12 @@ export default function TeamDashboard() {
 
     withAssessments.forEach((m) => {
       if (m.assessment) {
-        // Count leadership families
-        const family = m.assessment.leadership_family;
+        const family = m.assessment.leadershipFamily;
         familyDistribution[family] = (familyDistribution[family] || 0) + 1;
 
-        // Count leadership types
-        const type = m.assessment.leadership_type;
+        const type = m.assessment.leadershipType;
         typeDistribution[type] = (typeDistribution[type] || 0) + 1;
 
-        // Accumulate scores
         const scores = m.assessment.scores as number[];
         if (Array.isArray(scores) && scores.length === 13) {
           scoreAccumulator.eq.SA += scores[0];
@@ -271,14 +191,13 @@ export default function TeamDashboard() {
       },
     };
 
-    // Calculate overall percentage (average of all 13 metrics)
-    const totalScore = Object.values(averageScores.eq).reduce((a, b) => a + b, 0) +
+    const totalScore =
+      Object.values(averageScores.eq).reduce((a, b) => a + b, 0) +
       Object.values(averageScores.bed).reduce((a, b) => a + b, 0) +
       Object.values(averageScores.culture).reduce((a, b) => a + b, 0);
-    const maxPossible = 13 * 80; // 13 metrics, max 80 each
+    const maxPossible = 13 * 80;
     const overallPercentage = Math.round((totalScore / maxPossible) * 100);
 
-    // Build all metrics array for sorting
     const allMetrics: MetricInfo[] = [
       ...Object.entries(EQ_PILLARS).map(([code, pillar]) => ({
         code,
@@ -303,7 +222,6 @@ export default function TeamDashboard() {
       })),
     ];
 
-    // Sort to find strengths (top 3) and growth areas (bottom 3)
     const sortedMetrics = [...allMetrics].sort((a, b) => b.percentage - a.percentage);
     const teamStrengths = sortedMetrics.slice(0, 3);
     const teamGrowthAreas = sortedMetrics.slice(-3).reverse();
@@ -339,39 +257,7 @@ export default function TeamDashboard() {
 
     setDeleting(true);
     try {
-      // Delete the organization - RLS policies will handle cascading or we delete manually
-      // First delete invitations
-      await supabase
-        .from('invitations')
-        .delete()
-        .eq('organization_id', orgId);
-
-      // Delete organization members
-      await supabase
-        .from('organization_members')
-        .delete()
-        .eq('organization_id', orgId);
-
-      // Delete assessments for this org
-      await supabase
-        .from('assessments')
-        .delete()
-        .eq('organization_id', orgId);
-
-      // Finally delete the organization
-      const { error: deleteError } = await supabase
-        .from('organizations')
-        .delete()
-        .eq('id', orgId);
-
-      if (deleteError) {
-        console.error('Error deleting team:', deleteError);
-        alert('Failed to delete team. Please try again.');
-        setDeleting(false);
-        return;
-      }
-
-      // Navigate back to dashboard
+      await apiClient.organizations.delete(orgId);
       navigate('/dashboard');
     } catch (err) {
       console.error('Error deleting team:', err);
@@ -385,14 +271,9 @@ export default function TeamDashboard() {
     try {
       const success = await revokeInvitation(inviteId);
       if (success) {
-        // Remove from local state
-        setPendingInvites(prev => prev.filter(i => i.id !== inviteId));
-        // Update metrics
+        setPendingInvites((prev) => prev.filter((i) => i.id !== inviteId));
         if (metrics) {
-          setMetrics({
-            ...metrics,
-            pendingInvites: metrics.pendingInvites - 1,
-          });
+          setMetrics({ ...metrics, pendingInvites: metrics.pendingInvites - 1 });
         }
       } else {
         alert('Failed to revoke invitation. Please try again.');
@@ -406,9 +287,7 @@ export default function TeamDashboard() {
   };
 
   const handleCopyInviteLink = async (token: string, inviteId: string) => {
-    const appUrl = import.meta.env.VITE_APP_URL || window.location.origin;
-    const inviteLink = `${appUrl}/invite/${token}`;
-
+    const inviteLink = `${window.location.origin}/invite/${token}`;
     try {
       await navigator.clipboard.writeText(inviteLink);
       setCopiedInviteId(inviteId);
@@ -448,22 +327,12 @@ export default function TeamDashboard() {
     return null;
   }
 
-  // Allow access to insights if user is owner OR has admin account type
-  const isOwner = organization.owner_id === user?.id;
+  const isOwner = organization.ownerId === user?.id;
   const canViewInsights = isOwner || authProfile?.account_type === 'admin';
-
-  console.log('TeamDashboard - Access check:', {
-    userId: user?.id,
-    ownerId: organization.owner_id,
-    isOwner,
-    accountType: authProfile?.account_type,
-    canViewInsights,
-  });
 
   return (
     <div className="team-dashboard">
       <div className="team-container">
-        {/* Header */}
         <header className="team-header">
           <div className="header-nav">
             <button onClick={() => navigate('/dashboard')} className="back-link">
@@ -477,10 +346,7 @@ export default function TeamDashboard() {
             </div>
             {isOwner && (
               <div className="header-actions">
-                <button
-                  className="btn btn-primary"
-                  onClick={() => setShowInviteModal(true)}
-                >
+                <button className="btn btn-primary" onClick={() => setShowInviteModal(true)}>
                   + Invite Member
                 </button>
                 <button
@@ -494,7 +360,6 @@ export default function TeamDashboard() {
           </div>
         </header>
 
-        {/* Stats Overview */}
         <div className="stats-overview">
           <div className="stat-card">
             <span className="stat-value">{metrics.totalMembers}</span>
@@ -519,7 +384,6 @@ export default function TeamDashboard() {
           </div>
         </div>
 
-        {/* Tab Navigation */}
         <div className="tab-navigation">
           <button
             className={`tab-btn ${activeTab === 'members' ? 'active' : ''}`}
@@ -538,10 +402,8 @@ export default function TeamDashboard() {
           )}
         </div>
 
-        {/* Tab Content */}
         {activeTab === 'members' || !canViewInsights ? (
           <div className="members-section">
-            {/* Pending Invitations */}
             {pendingInvites.length > 0 && isOwner && (
               <div className="pending-invites">
                 <h3>Pending Invitations</h3>
@@ -549,11 +411,11 @@ export default function TeamDashboard() {
                   {pendingInvites.map((invite) => (
                     <div key={invite.id} className="invite-item">
                       <span className="invite-email">{invite.email}</span>
-                      <span className={`invite-type ${invite.member_type}`}>
-                        {invite.member_type === 'candidate' ? 'Candidate' : 'Team'}
+                      <span className={`invite-type ${invite.memberType}`}>
+                        {invite.memberType === 'candidate' ? 'Candidate' : 'Team'}
                       </span>
                       <span className="invite-date">
-                        Sent {new Date(invite.created_at).toLocaleDateString()}
+                        Sent {new Date(invite.createdAt || '').toLocaleDateString()}
                       </span>
                       <div className="invite-actions">
                         <button
@@ -576,15 +438,11 @@ export default function TeamDashboard() {
               </div>
             )}
 
-            {/* Members List */}
             {members.length === 0 ? (
               <div className="empty-members">
                 <p>No team members yet. Invite people to join your team!</p>
                 {isOwner && (
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => setShowInviteModal(true)}
-                  >
+                  <button className="btn btn-primary" onClick={() => setShowInviteModal(true)}>
                     Invite First Member
                   </button>
                 )}
@@ -595,17 +453,17 @@ export default function TeamDashboard() {
                   <div key={member.id} className="member-card">
                     <div className="member-info">
                       <div className="member-avatar">
-                        {member.profile?.first_name?.[0] || member.profile?.email?.[0] || '?'}
+                        {member.profile?.firstName?.[0] || member.profile?.email?.[0] || '?'}
                       </div>
                       <div className="member-details">
                         <h4>
-                          {member.profile?.first_name && member.profile?.last_name
-                            ? `${member.profile.first_name} ${member.profile.last_name}`
+                          {member.profile?.firstName && member.profile?.lastName
+                            ? `${member.profile.firstName} ${member.profile.lastName}`
                             : member.profile?.email || 'Unknown'}
                         </h4>
                         <span className="member-email">{member.profile?.email}</span>
-                        <span className={`member-type ${member.member_type}`}>
-                          {member.member_type === 'candidate' ? 'Candidate' : 'Team Member'}
+                        <span className={`member-type ${member.memberType}`}>
+                          {member.memberType === 'candidate' ? 'Candidate' : 'Team Member'}
                         </span>
                       </div>
                     </div>
@@ -614,18 +472,18 @@ export default function TeamDashboard() {
                       <div className="member-assessment">
                         <div
                           className="leadership-badge"
-                          style={{ borderColor: getFamilyColor(member.assessment.leadership_family) }}
+                          style={{ borderColor: getFamilyColor(member.assessment.leadershipFamily) }}
                         >
                           <span
                             className="family-name"
-                            style={{ color: getFamilyColor(member.assessment.leadership_family) }}
+                            style={{ color: getFamilyColor(member.assessment.leadershipFamily) }}
                           >
-                            {member.assessment.leadership_family}
+                            {member.assessment.leadershipFamily}
                           </span>
-                          <span className="type-name">{member.assessment.leadership_type}</span>
+                          <span className="type-name">{member.assessment.leadershipType}</span>
                         </div>
                         <span className="completed-date">
-                          Completed {new Date(member.assessment.completed_at).toLocaleDateString()}
+                          Completed {new Date(member.assessment.completedAt || '').toLocaleDateString()}
                         </span>
                       </div>
                     ) : (
@@ -646,7 +504,6 @@ export default function TeamDashboard() {
               </div>
             ) : (
               <>
-                {/* Team Overview */}
                 <div className="insight-card team-overview">
                   <div className="overview-score">
                     <div className="score-circle">
@@ -671,12 +528,12 @@ export default function TeamDashboard() {
                   <div className="overview-details">
                     <h3>Team Performance Overview</h3>
                     <p className="overview-description">
-                      Based on {metrics.completedAssessments} completed assessment{metrics.completedAssessments !== 1 ? 's' : ''}.
+                      Based on {metrics.completedAssessments} completed assessment
+                      {metrics.completedAssessments !== 1 ? 's' : ''}.
                     </p>
                   </div>
                 </div>
 
-                {/* Team Strengths & Growth Areas */}
                 <div className="strengths-growth-container">
                   <div className="insight-card strengths-card">
                     <h3>Team Strengths</h3>
@@ -712,7 +569,6 @@ export default function TeamDashboard() {
                   </div>
                 </div>
 
-                {/* Leadership Type Distribution */}
                 <div className="insight-card">
                   <h3>Leadership Types on Your Team</h3>
                   <div className="type-distribution">
@@ -720,9 +576,8 @@ export default function TeamDashboard() {
                       const typeData = LEADERSHIP_TYPES[typeCode as LeadershipTypeCode];
                       const familyCode = typeData?.family;
                       const familyData = familyCode ? LEADERSHIP_FAMILIES[familyCode] : null;
-                      // Find members with this leadership type
                       const membersWithType = members.filter(
-                        (m) => m.assessment?.leadership_type === typeCode
+                        (m) => m.assessment?.leadershipType === typeCode
                       );
                       return (
                         <div key={typeCode} className="type-item has-tooltip">
@@ -738,8 +593,9 @@ export default function TeamDashboard() {
                               {familyData?.name || 'Unknown'}
                             </span>
                           </div>
-                          <span className="type-count">{count} member{count !== 1 ? 's' : ''}</span>
-                          {/* Hover tooltip with member names */}
+                          <span className="type-count">
+                            {count} member{count !== 1 ? 's' : ''}
+                          </span>
                           <div className="type-tooltip">
                             <div className="tooltip-header">
                               <span style={{ color: familyData?.color || '#666' }}>
@@ -750,8 +606,8 @@ export default function TeamDashboard() {
                               {membersWithType.map((member) => (
                                 <div key={member.id} className="tooltip-member">
                                   <span className="tooltip-member-name">
-                                    {member.profile?.first_name && member.profile?.last_name
-                                      ? `${member.profile.first_name} ${member.profile.last_name}`
+                                    {member.profile?.firstName && member.profile?.lastName
+                                      ? `${member.profile.firstName} ${member.profile.lastName}`
                                       : member.profile?.email || 'Unknown'}
                                   </span>
                                 </div>
@@ -764,7 +620,6 @@ export default function TeamDashboard() {
                   </div>
                 </div>
 
-                {/* Leadership Family Distribution */}
                 <div className="insight-card">
                   <h3>Leadership Family Distribution</h3>
                   <div className="family-distribution">
@@ -787,10 +642,7 @@ export default function TeamDashboard() {
                           <div className="bar-container">
                             <div
                               className="bar-fill"
-                              style={{
-                                width: `${percentage}%`,
-                                backgroundColor: family.color,
-                              }}
+                              style={{ width: `${percentage}%`, backgroundColor: family.color }}
                             />
                           </div>
                         </div>
@@ -799,7 +651,6 @@ export default function TeamDashboard() {
                   </div>
                 </div>
 
-                {/* Average EQ Scores */}
                 <div className="insight-card">
                   <h3>Team EQ Profile (Averages)</h3>
                   <div className="scores-grid">
@@ -814,10 +665,7 @@ export default function TeamDashboard() {
                             <span className="score-name">{pillar.name}</span>
                           </div>
                           <div className="score-bar">
-                            <div
-                              className="score-fill"
-                              style={{ width: `${(score / 80) * 100}%` }}
-                            />
+                            <div className="score-fill" style={{ width: `${(score / 80) * 100}%` }} />
                           </div>
                           <span className="score-value">{score}/80</span>
                         </div>
@@ -826,7 +674,6 @@ export default function TeamDashboard() {
                   </div>
                 </div>
 
-                {/* Average B.E.D. Scores */}
                 <div className="insight-card">
                   <h3>Team B.E.D. Profile (Averages)</h3>
                   <div className="scores-grid">
@@ -841,10 +688,7 @@ export default function TeamDashboard() {
                             <span className="score-name">{factor.name}</span>
                           </div>
                           <div className="score-bar">
-                            <div
-                              className="score-fill"
-                              style={{ width: `${(score / 80) * 100}%` }}
-                            />
+                            <div className="score-fill" style={{ width: `${(score / 80) * 100}%` }} />
                           </div>
                           <span className="score-value">{score}/80</span>
                         </div>
@@ -853,7 +697,6 @@ export default function TeamDashboard() {
                   </div>
                 </div>
 
-                {/* Average Culture Scores */}
                 <div className="insight-card">
                   <h3>Team Culture Index (Averages)</h3>
                   <div className="scores-grid">
@@ -870,10 +713,7 @@ export default function TeamDashboard() {
                             <span className="score-name">{dimension.name}</span>
                           </div>
                           <div className="score-bar">
-                            <div
-                              className="score-fill"
-                              style={{ width: `${(score / 80) * 100}%` }}
-                            />
+                            <div className="score-fill" style={{ width: `${(score / 80) * 100}%` }} />
                           </div>
                           <span className="score-value">{score}/80</span>
                         </div>
@@ -887,7 +727,6 @@ export default function TeamDashboard() {
         )}
       </div>
 
-      {/* Invite Modal */}
       {showInviteModal && organization && (
         <InviteMemberModal
           organization={organization}
@@ -896,7 +735,6 @@ export default function TeamDashboard() {
         />
       )}
 
-      {/* Delete Confirmation Modal */}
       {showDeleteConfirm && (
         <div className="modal-backdrop" onClick={() => !deleting && setShowDeleteConfirm(false)}>
           <div className="modal-content delete-confirm-modal" onClick={(e) => e.stopPropagation()}>
@@ -904,9 +742,7 @@ export default function TeamDashboard() {
             <p className="delete-warning">
               Are you sure you want to delete <strong>{organization?.name}</strong>?
             </p>
-            <p className="delete-details">
-              This will permanently delete:
-            </p>
+            <p className="delete-details">This will permanently delete:</p>
             <ul className="delete-list">
               <li>All team members ({metrics?.totalMembers || 0})</li>
               <li>All assessments ({metrics?.completedAssessments || 0})</li>
@@ -921,11 +757,7 @@ export default function TeamDashboard() {
               >
                 Cancel
               </button>
-              <button
-                className="btn btn-danger"
-                onClick={handleDeleteTeam}
-                disabled={deleting}
-              >
+              <button className="btn btn-danger" onClick={handleDeleteTeam} disabled={deleting}>
                 {deleting ? 'Deleting...' : 'Delete Team'}
               </button>
             </div>

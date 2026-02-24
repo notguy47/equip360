@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { createInvitation } from '@/services/invitations';
-import type { Organization } from '@/types/database';
+import type { Organization } from '@/lib/apiClient';
 import './InviteMemberModal.css';
 
 interface InviteMemberModalProps {
@@ -32,6 +32,7 @@ export default function InviteMemberModal({
     try {
       const result = await createInvitation({
         organizationId: organization.id,
+        organizationName: organization.name,
         email: email.trim(),
         memberType,
         sendEmail: true,
